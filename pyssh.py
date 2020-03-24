@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import sys
+import os
+if sys.version_info < (3, 6, 0):
+   sys.exit(f'[ERROR]: {__file__} Can\'t Run, Please Upgrade Python Installed On System!')
+
+if not ('posix' in sys.builtin_module_names):
+   sys.exit(f'[ERROR]: {__file__} Can\'t Run, Please Run On POSIX OS System!')
+
+from  pathlib import Path
+from  argparse import ArgumentParser, ArgumentTypeError
+
+root_path = Path(sys.argv[0]).resolve().parent
+libs_path = Path(root_path) / 'lib'
+if libs_path.exists():
+    sys.path.append(str(libs_path))
+
+# disable deprecationwarnings
+import warnings
+warnings.simplefilter('ignore', DeprecationWarning)
+try:
+    import time #now
+    import pwd #CurUser
+    import socket
+    import atexit
+    import signal
+    import socket
+    import subprocess
+    import pexpect #ssh ptyprocess
+    import pxssh_wrapper
+except ImportError as Err:
+    sys.exit(f'[ERROR]: unable to import module: {Err}')
+
+
+############################################################
+__author__ = 'Viocal Pan <viocal@qq.com>'
+__run__ = 'pyssh.py'  #os.path.splitext(__file__)[0]
+__app__ = Path(__run__).stem
+__path__ = str(root_path)
+__run__  = Path(sys.argv[0]).stem
+
+appName = __app__
+appVer = '0.6.0'
+appPath = __path__
+appDesc = '  -- ssh access to multiple hosts at once from greenplum\'s gpssh'
+
+gargv = {'allHosts': [], 'remoteHosts':[], 'hostname':None, 'CurUser':None, 'homeDir':None, 'echo': False,
+	       'DELAY_BEFORE_SEND':0.05, 'PROMPT_VALIDATION_TIMEOUT':1.0, 'SYNC_RETRIES':3}
+
+################################################################
+def is_file(path):
+    if not Path(path).is_file():
+        raise ArgumentTypeError('[ERROR]: Provided file is not a file: {}'.format(path))
+    return  str(Path(path).resolve())
+
+################
+cmdarg = None
+def  parseargs():
+    global cmdarg
+    parser = ArgumentParser(prog=appName, description=''.join((appName,appDesc)))
+    parser.add_argument('-ver', action='version',
+             version = f'{appName}{appDesc} version:[{appVer}]')
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('-a', '--add', dest='addhost', nargs='+',
+             help = 'the new host to connect to(multiple -a is okay)')
+    group.add_argument('-f', '--file', dest='allhost', type=is_file,
+             help = 'a file listing all new hosts to connect to')
+    parser.add_argument('-e', dest='echo', action='store_true', default=gargv['echo'],
+             help = 'echo commands as they are executed')
+    parser.add_argument('cmd', nargs='*',
+          help = 'the command to execute. If not present,go into interactive mode')
+    cmdarg = parser.parse_args()
+
+parseargs()
+
+if __run__ !=  __app__:
+   sys.exit(f'[ERROR]: {__run__} Can\'t Run, Please Upgrade Python Installed On System!')
+
+################################################################################
+def now(tm=time.time()):
+  return  time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(tm))
+
+########
+def h_key(D, K):
+   return (K in D.keys())
+
+########
+def to_str(S):
+  if isinstance(S, bytes):
+      value = S.decode('utf-8')
+  else:
+      value = S
+  return value
+
+########
+def readfline(filename):
+   filename = Path(filename)
+   LineV = []
+   if filename.is_file():
+      filename = str(filename.resolve())
+      f = None
+      try:
+         f = open(filename, 'r')
+         lines = f.readlines()
+         for line in lines:
+            line = line.strip()
+            if not len(line):
+               continue
+            L = line.split('#')[0]
+            L = L.strip()
+            if not len(L):
+               continue
+            V = L.split()[0]
+            V = V.strip()
+            if V: LineV.append(V)
+      except Exception as Err:
+         pass
+      finally:
+         if f: f.close()
+         return LineV
+
+########
+def runlocalcmd(cmdstr,cwd='.'):
+     p = subprocess.Popen(cmdstr, cwd=cwd, stdout = subprocess.PIPE, stderr = subprocess.PIPE, shell=True)
+     out,err = p.communicate()
+     retcode = p.returncode
+     if not err:
+        return  retcode, to_str(out).strip()
+     else:
+        return  retcode, to_str(err).strip()
+
+################################################################################
+if cmdarg.addhost:
+    gargv['allHosts'].extend(cmdarg.addhost)
+if cmdarg.allhost:
+    gargv['allHosts'].extend(readfline(cmdarg.allhost))
+
+gargv['allHosts'] = list(set(gargv['allHosts']))
+gargv['echo'] = cmdarg.echo
+gargv['cmd'] = ' '.join(cmdarg.cmd)
+gargv['cmd']  = gargv['cmd'] .strip()
+
+################################################################
+def  collectHosts():
+
+# current user & local hostname & ip
+    gargv['hostname'] = socket.gethostname()
+    gargv['CurUser'] = pwd.getpwuid(os.getuid()).pw_name
+    gargv['homeDir'] = pwd.getpwuid(os.getuid()).pw_dir #Path.home()
+    LlocalHosts = []
+    LlocalIP = []
+
+# collect local ip
+# ip -o -4 addr show up primary scope global | awk '{print $4}'|cut -f1 -d"/"
+# ip addr show |grep -iw inet |grep -iv 127.0.0.1| awk '{print $2}'|cut -f1 -d"/"
+# ifconfig |grep -iw inet|grep -iv 127.0.0.1 |awk '{print $2}'|cut -f2 -d":"
+
+    cmdLOCALipGet1 = 'ip -o -4 addr show up primary scope global | awk \'{print $4}\'|cut -f1 -d"/"'
+    cmdLOCALipGet2 = 'ifconfig |grep -iw inet|grep -iv 127.0.0.1 |awk \'{print $2}\'|cut -f2 -d":"'
+    rc,rs = runlocalcmd(f'{cmdLOCALipGet1} || {cmdLOCALipGet2}')
+    if rc != 0:
+       exit(f'[ERROR]: {__run__} collect local ip {rs}!')
+    LlocalIP = rs.split()
+    if len(LlocalIP) == 0:
+        exit(f'[ERROR]: {__run__}  can\'t get local ip!')
+
+    LlocalHosts.append(gargv['hostname'])
+    for host in gargv['allHosts']:
+        try:
+            ip = socket.gethostbyname(host)
+            if (ip in LlocalIP):
+                LlocalHosts.append(host)
+                continue
+        except ImportError as Err:
+            continue
+        gargv['remoteHosts'].append(host)
+    LlocalHosts = list(set(LlocalHosts))
+    if len(LlocalHosts) > 0:
+       gargv['remoteHosts'].append(LlocalHosts[0])
+
+################################
+def  sessionCleanup(sshsession):
+    while True:
+        try:
+            return_code = 0
+            if sshsession:
+                if sshsession.verbose: print('\n[Cleanup...]');
+                return_code = sshsession.close()
+            sshsession = None
+            return return_code
+        except KeyboardInterrupt:
+            pass
+
+
+sigint_time = 0
+def  sigint_handle(signum, frame):
+    global sigint_time
+    now = time.time()
+    if now - sigint_time >= 3:
+        sigint_time = now
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    print('\n[Exiting...]')
+    sys.exit(1)
+
+def sighup_handle(signum, frame):
+    sys.exit(1)
+
+################################
+def  interactive(sshsession):
+    try:
+        import readline
+        # Read in the saved command history, if any
+        histfile = Path(gargv['homeDir'])/ '.pyssh_his'
+        readline.set_history_length(500)
+        try:
+            readline.read_history_file(histfile)
+        except IOError:
+            pass
+        # MPP-4054 - let's check the permissons before we register
+        try:
+            f = open(histfile, 'a')
+            atexit.register(readline.write_history_file, histfile)
+            f.close()
+        except IOError as Err:
+            print(f'\n[WARN] Unable to write to pyssh history file: \'{histfile}\'. Please check permissions.')
+
+    except Exception as Err:
+        print(f'Note: command history unsupported on this machine {Err}')
+
+    atexit.register(sessionCleanup,sshsession=sshsession)
+    signal.signal(signal.SIGINT, sigint_handle)
+    signal.signal(signal.SIGHUP, sighup_handle)
+    while True:
+        try:
+            if not sshsession:
+                sshsession = pxssh_wrapper.Session()
+                sshsession.verbose = False
+                sshsession.login(gargv['remoteHosts'], gargv['CurUser'], gargv['DELAY_BEFORE_SEND'], gargv['PROMPT_VALIDATION_TIMEOUT'], gargv['SYNC_RETRIES'])
+                sshsession.echoCommand = gargv['echo']
+            sshsession.cmdloop()
+        except pexpect.EOF:
+            print('\n[Unexpected EOF from some hosts...]')
+            pass
+        except pxssh_wrapper.Session.SessionCmdExit:
+            print()
+            break
+        except pxssh_wrapper.Session.SessionError as Err:
+            print(f'Error: {Err}')
+            pass
+        except KeyboardInterrupt:
+            print(f'\n[Interrupt...]')
+            sshsession.reset()
+            pass
+
+################################################################
+try:
+    sshsession = None
+    collectHosts()
+    if gargv['cmd']:
+        try:
+            sshsession = pxssh_wrapper.Session()
+            sshsession.verbose = False
+            sshsession.login(gargv['remoteHosts'], gargv['CurUser'], gargv['DELAY_BEFORE_SEND'], gargv['PROMPT_VALIDATION_TIMEOUT'], gargv['SYNC_RETRIES'])
+            sshsession.echoCommand = gargv['echo']
+            output = sshsession.executeCommand(gargv['cmd'])
+            sshsession.writeCommandOutput(output)
+            if sshsession.verbose: print('[INFO] completed successfully')
+            sys.stdout.flush()
+        except pxssh_wrapper.Session.SessionError as Err:
+            print(f'Error: {Err}')
+            pass
+
+    else:
+        interactive(sshsession)
+
+    return_code = sessionCleanup(sshsession)
+    sys.exit(return_code)
+
+except KeyboardInterrupt:
+    sys.exit('\n\nInterrupted...')
+
+finally:
+    sessionCleanup(sshsession)
