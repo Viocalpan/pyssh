@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+
+"""
+rewite greenplum tools (gpssh,gpscp,gpssh-exkeys) with python3 and remove 3th library only Dependencies pexpect
+cat  hosts
+gp
+gp2
+gp3
+gp4
+
+###########
+# pysshexK -f hosts
+# pyscp -f hosts /viocal/*.gz  =:/tmp
+# pyssh -f hosts
+
+"""
 import sys
 import os
 if sys.version_info < (3, 6, 0):
@@ -17,18 +32,25 @@ libs_path = Path(root_path) / 'lib'
 if libs_path.exists():
     sys.path.append(str(libs_path))
 
+# disable deprecationwarnings
+import warnings
+warnings.simplefilter('ignore', DeprecationWarning)
 try:
+    import time
     import pwd #curUser
     import socket
+    import atexit
+    import signal
     import subprocess
-    import getpass
-    from pexpect import pxssh #ssh ptyprocess
+    import threading
+    import cmd
+    from pexpect import pxssh, TIMEOUT, EOF #ssh ptyprocess
 except ImportError as Err:
     sys.exit(f'[ERROR]: unable to import module: {Err}')
 
 ############################################################
 __author__ = 'Viocal Pan <viocal@qq.com>'
-__run__ = 'pysshexK.py'  #os.path.splitext(__file__)[0]
+__run__ = 'pyssh.py'  #os.path.splitext(__file__)[0]
 __app__ = Path(__run__).stem
 __path__ = str(root_path)
 __run__  = Path(sys.argv[0]).stem
@@ -36,11 +58,10 @@ __run__  = Path(sys.argv[0]).stem
 appName = __app__
 appVer = '0.6.0'
 appPath = __path__
-appDesc = '  -- exchange ssh public keys among friends from greenplum\'s gpssh-exkeys'
+appDesc = '  -- ssh access to multiple hosts at once from greenplum\'s gpssh'
 
-gargv = {'typ':'rsa', 'fId_key':'id_rsa', 'fId_key_pub':'id_rsa.pub', 'fAuthorized_keys':'authorized_keys', 
-        'fKnown_hosts':'known_hosts', 'pubKey':'',
-        'allHosts': [], 'remoteHosts':[], 'hostname':None, 'curUser':None, 'homeDir':None}
+gargv = {'allHosts': [], 'remoteHosts':[], 'hostname':None, 'curUser':None, 'homeDir':None, 'echo': False,
+	       'DELAY_BEFORE_SEND':0.05, 'PROMPT_VALIDATION_TIMEOUT':1.0, 'SYNC_RETRIES':3}
 
 ################################################################
 def is_file(path):
@@ -60,6 +81,10 @@ def  parseargs():
              help = 'the new host to connect to(multiple -a is okay)')
     group.add_argument('-f', '--file', dest='allhost', type=is_file,
              help = 'a file listing all new hosts to connect to')
+    parser.add_argument('-e', dest='echo', action='store_true', default=gargv['echo'],
+             help = 'echo commands as they are executed')
+    parser.add_argument('cmd', nargs='*',
+          help = 'the command to execute. If not present,go into interactive mode')
     cmdarg = parser.parse_args()
 
 parseargs()
@@ -67,7 +92,7 @@ parseargs()
 if __run__ !=  __app__:
    sys.exit(f'[ERROR]: {__run__} Can\'t Run, Please Upgrade Python Installed On System!')
 
-################################################################################
+################################################################
 def to_str(S):
   if isinstance(S, bytes):
       value = S.decode('utf-8')
@@ -112,40 +137,6 @@ def runlocalcmd(cmdstr,cwd='.'):
      else:
         return  retcode, to_str(err).strip()
 
-########
-class ssh_connect():
-    def  __init__(self, hostname,username,passwd='',pw=None):
-       self.rssh = None
-       try:
-          self.rssh = pxssh.pxssh(echo=False)
-          if not passwd:
-              passwd = getpass.getpass('password: ')
-          self.rssh.login(hostname, username, passwd, original_prompt='[$#>]')
-          if pw:
-              self.__msg__ = passwd
-          self.msg = f'{username}@{hostname}'
-       except pxssh.ExceptionPxssh as Err:
-           self.rssh = None
-           self.msg = f'{Err}' # 'password refused'
-            #self.glog.error(Err)
-    def  runcmd(self,cmd):
-       if self.rssh:
-           self.rssh.sendline(cmd)
-           self.rssh.prompt()
-           rs = to_str(self.rssh.before)
-           L = len(cmd)
-           if cmd == rs[0:L]:
-               rs = rs[L:]
-           return  rs.strip()
-    def  close(self):
-       if self.rssh:
-           self.rssh.sendline('history -c')
-           self.rssh.logout()
-           self.rssh = None
-           if hasattr(self, '__msg__'):
-               del self.__msg__
-           self.msg = f'closed'
-
 ################################################################################
 if cmdarg.addhost:
     gargv['allHosts'].extend(cmdarg.addhost)
@@ -153,16 +144,12 @@ if cmdarg.allhost:
     gargv['allHosts'].extend(readfline(cmdarg.allhost))
 
 gargv['allHosts'] = list(set(gargv['allHosts']))
+gargv['echo'] = cmdarg.echo
+gargv['cmd'] = ' '.join(cmdarg.cmd)
+gargv['cmd']  = gargv['cmd'] .strip()
 
 ################################################################
 def  collectHosts():
-######################
-#  step 1
-#
-#    Colection Local Hostname & IP
-#    and appends Remotehost Lists.
-#
-    print (f'\r\n[STEP 1 of 3] create hostlist and local hostname and remote hostname')
 
 # current user & local hostname & ip
     gargv['hostname'] = socket.gethostname()
@@ -170,7 +157,7 @@ def  collectHosts():
     gargv['homeDir'] = pwd.getpwuid(os.getuid()).pw_dir #Path.home()
     LlocalHosts = []
     LlocalIP = []
-    
+
 # collect local ip
 # ip -o -4 addr show up primary scope global | awk '{print $4}'|cut -f1 -d"/"
 # ip addr show |grep -iw inet |grep -iv 127.0.0.1| awk '{print $2}'|cut -f1 -d"/"
@@ -196,197 +183,411 @@ def  collectHosts():
             continue
         gargv['remoteHosts'].append(host)
     LlocalHosts = list(set(LlocalHosts))
+    if len(LlocalHosts) > 0:
+       gargv['remoteHosts'].append(LlocalHosts[0])
+
+################################################################
+#
+#greenplum gppylib
+#
+CRNL = '\r\n'
+
+# experimentally derived that a sequence of tries with delays of
+#  1, 5, 25, 125 secs worked to surmount a 1-second delay (via `tc` test)
+RETRY_EXPONENT = 5
+
+class PxsshWrapper(pxssh.pxssh):
+    def __init__(self, delaybeforesend, sync_retries, options):
+        self.sync_retries = sync_retries
+        self.delaybeforesend=delaybeforesend
+        super(PxsshWrapper, self).__init__(options=options)
+
+    def sync_original_prompt(self, sync_multiplier=1.0):
+        """
+        override the pxssh method to allow retries with extended timeout intervals
+        """
+        # make two attempts to throw away, perhaps emptying any initial Message Of The Day.
+        # In practice, the first request can take a huge amount of time, compared to subsequent requests,
+        # so give it a 5-second max wait as a special case.
+        self.sendline()
+        self.wait_for_any_response(max_wait_secs=5)
+        self.clear_response_channel()
+
+        self.sendline()
+        self.try_read_prompt(sync_multiplier)
+
+        # Each retry should go more slowly to accommodate possible cpu load, network,
+        # or other issues on the segment host that might delay when we receive the prompt.
+        num_retries = self.sync_retries
+        retry_attempt = 0
+        success = False
+        while (not success) and retry_attempt <= num_retries:
+            # each retry will get an exponentially longer timeout interval
+            sync_multiplier_for_this_retry = sync_multiplier * (RETRY_EXPONENT ** retry_attempt)
+
+            self.sendline()
+            first_prompt = self.try_read_prompt(sync_multiplier_for_this_retry)
+
+            self.sendline()
+            second_prompt = self.try_read_prompt(sync_multiplier_for_this_retry)
+
+            success = self.are_prompts_similar(first_prompt, second_prompt)
+            if not success:
+                retry_attempt += 1
+                if retry_attempt <= num_retries:
+                    # This attempt has failed to allow enough time.
+                    # We want to "clear the runway" before another attempt.
+                    # The next attempt will have a wait that is exponent times as long.
+                    # To clear the runway, we sleep for about as long as this upcoming retry.
+                    # Thus, the overall duration of this retry cycle becomes
+                    # roughly equivalent to the timeout used by the next attempt
+                    time.sleep(RETRY_EXPONENT * sync_multiplier_for_this_retry)
+                    self.clear_response_channel()
+
+        return success
+
+    def clear_response_channel(self):
+        """remove any readily-available characters. stop as soon as even a little wait time is discovered"""
+        prompt = "dummy non empty"
+        while prompt:
+            try:
+                prompt = self.read_nonblocking(size=1, timeout=0.01)
+
+            except TIMEOUT as Err:
+                break
+
+    def wait_for_any_response(self, max_wait_secs=5):
+        duration = 0
+        while duration < max_wait_secs:
+            start = time.time()
+            try:
+                prompt = self.read_nonblocking(size=1, timeout=0.01)
+                if prompt:
+                    break
+            except TIMEOUT as Err:
+                duration += time.time() - start
+
+    def is_prompt_bad(self, prompt_output):
+        return len(prompt_output) == 0 or prompt_output == CRNL
+
+    def are_prompts_similar(self, prompt_one, prompt_two):
+        if self.is_prompt_bad(prompt_one) or self.is_prompt_bad(prompt_two):
+            return False
+
+        if len(prompt_one) == 0:
+            return False  # it will be used as the denominator of a ratio
+        lev_dist = self.levenshtein_distance(prompt_one, prompt_two)
+        lev_ratio = float(lev_dist) / len(prompt_one)
+
+        if lev_ratio < 0.4:
+            return True
+        else:
+            pass
+        return False
+
+# Session is a command session, derived from a base class cmd.Cmd
+class Session(cmd.Cmd):
+    '''Implements a list of open ssh sessions ready to execute commands'''
+    verbose = False
+    hostList = []
+    userName = None
+    echoCommand = False
+
+    class SessionError(BaseException):
+        pass
+
+    class SessionCmdExit(BaseException):
+        pass
+
+    def __init__(self, hostList=None, userName=None):
+        cmd.Cmd.__init__(self)
+        self.pxssh_list = []
+        self.prompt = '=> '
+        self.peerStringFormatRaw = None
+        if hostList:
+            for host in hostList:
+                self.hostList.append(host)
+        if userName: self.userName = userName
+
+    def peerStringFormat(self):
+        if self.peerStringFormatRaw: return self.peerStringFormatRaw
+        cnt = 0
+        for p in self.pxssh_list:
+            if cnt < len(p.x_peer): cnt = len(p.x_peer)
+        self.peerStringFormatRaw = "[%%%ds]" % cnt
+        return self.peerStringFormatRaw
+
+    def login(self, hostList=None, userName=None, delaybeforesend=0.05, sync_multiplier=1.0, sync_retries=3):
+        """This is the normal entry point used to add host names to the object and log in to each of them"""
+        if self.verbose: print('\n[Reset ...]')
+        if not (self.hostList or hostList):
+            raise self.SessionError('No host list available to Login method')
+        if not (self.userName or userName):
+            raise self.SessionError('No user name available to Login method')
+
+        # Cleanup
+        self.clean()
+
+        if hostList:  # We have a new hostlist to use, initialize it
+            self.hostList = []
+            for host in hostList:
+                self.hostList.append(host)
+        if userName:
+            self.userName = userName  # We have a new userName to use
+
+        # MPP-6583.  Save off term type and set to nothing before creating ssh process
+        origTERM = os.getenv('TERM', None)
+        os.putenv('TERM', '')
+
+        good_list = []
+        print_lock = threading.Lock()
+
+        def connect_host(hostname, p):
+            self.hostList.append(hostname)
+            try:
+                # The sync_multiplier value is passed onto pexpect.pxssh which is used to determine timeout
+                # values for prompt verification after an ssh connection is established.
+                p.login(hostname, self.userName, sync_multiplier=sync_multiplier)
+                p.x_peer = hostname
+                p.x_pid = p.pid
+                good_list.append(p)
+                if self.verbose:
+                    with print_lock:
+                        print(f'[INFO] login {hostname}')
+            except Exception as Err:
+                with print_lock:
+                    print(f'[ERROR] unable to login to {hostname}')
+                    if type(Err) is pxssh.ExceptionPxssh:
+                        print(Err)
+                    elif type(Err) is pxssh.EOF:
+                        print('Could not acquire connection.')
+                    else:
+                        print('hint: use pysshexK to setup public-key authentication between hosts')
+
+        thread_list = []
+        for host in hostList:
+            p = PxsshWrapper(delaybeforesend=delaybeforesend,
+                                             sync_retries=sync_retries,
+                                             options={"StrictHostKeyChecking": "no",
+                                                      "BatchMode": "yes"})
+            t = threading.Thread(target=connect_host, args=(host, p))
+            t.start()
+            thread_list.append(t)
+
+        for t in thread_list:
+            t.join()
+
+        # Restore terminal type
+        if origTERM:
+            os.putenv('TERM', origTERM)
+
+        self.pxssh_list = good_list
+
+    def close(self):
+        return self.clean()
+
+    def reset(self):
+        '''reads from all the ssh connections to make sure we dont have any pending cruft'''
+        for s in self.pxssh_list:
+            s.readlines()
+
+    def clean(self):
+        net_return_code = self.closePxsshList(self.pxssh_list)
+        self.pxssh_list = []
+        return net_return_code
+
+    def emptyline(self):
+        pass
+
+    def escapeLine(self, line):
+        '''Escape occurrences of \ and $ as needed and package the line as an "eval" shell command'''
+        line = line.strip()
+        if line == 'EOF' or line == 'exit' or line == 'quit':
+            raise self.SessionCmdExit()
+        line = line.split('\\')
+        line = '\\\\'.join(line)
+        line = line.split('"')
+        line = '\\"'.join(line)
+        line = line.split('$')
+        line = '\\$'.join(line)
+        line = 'eval "' + line + '" < /dev/null'
+
+        return line
+
+    def executeCommand(self, command):
+        commandoutput = []
+
+        if self.echoCommand:
+            escapedCommand = command.replace('"', '\\"')
+            command = 'echo "%s"; %s' % (escapedCommand, command)
+
+        # Execute the command in all of the ssh sessions
+        for s in self.pxssh_list:
+            s.sendline(command)
+
+        # Wait for each command and retrieve the output
+        for s in self.pxssh_list:
+            # Wait for each command to finish
+            # !! TODO verify that this is a tight wait loop and find another way to do this
+            while not s.prompt(120) and s.isalive() and not s.eof(): pass
+
+        for s in self.pxssh_list:
+            # Split the output into an array of lines so that we can add text to the beginning of
+            #    each line
+            output = to_str(s.before).split(CRNL)
+            output = output[1:-1]
+
+            commandoutput.append(output)
+
+        return commandoutput.__iter__()
+
+    # Interactive command line handler
+    #    Override of base class, handles commands that aren't recognized as part of a predefined set
+    #    The "command" argument is a command line to be executed on all available command sessions
+    #    The output of the command execution is printed to the standard output, prepended with
+    #        the hostname of each machine from which the output came
+    def default(self, command):
+
+        line = self.escapeLine(command)
+
+        if self.verbose: print(command)
+
+        # Execute the command on our ssh sessions
+        commandoutput = self.executeCommand(command)
+        self.writeCommandOutput(commandoutput)
+
+    def writeCommandOutput(self, commandoutput):
+        '''Takes a list of output lists as an iterator and writes them to standard output,
+        formatted with the hostname from which each output array was obtained'''
+        for s in self.pxssh_list:
+            output = next(commandoutput)
+            # Write the output
+            if len(output) == 0:
+                print(self.peerStringFormat() % s.x_peer)
+            else:
+                for line in output:
+                    print((self.peerStringFormat() % s.x_peer), line)
+
+    def closePxsshList(self, list):
+        lock = threading.Lock()
+        return_codes = [0]
+
+        def closePxsshOne(p, return_codes):
+            p.logout()
+            with lock:
+                return_codes.append(p.exitstatus)
+
+        th = []
+        for p in list:
+            t = threading.Thread(target=closePxsshOne, args=(p, return_codes))
+            t.start()
+            th.append(t)
+        for t in th:
+            t.join()
+        return max(return_codes)
+
+#greenplum gppylib
+################################################################
+def  sessionCleanup(sshsession):
+    while True:
+        try:
+            return_code = 0
+            if sshsession:
+                if sshsession.verbose: print('\n[Cleanup...]');
+                return_code = sshsession.close()
+            sshsession = None
+            return return_code
+        except KeyboardInterrupt:
+            pass
+
+
+sigint_time = 0
+def  sigint_handle(signum, frame):
+    global sigint_time
+    now = time.time()
+    if now - sigint_time >= 3:
+        sigint_time = now
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    print('\n[Exiting...]')
+    sys.exit(1)
+
+def sighup_handle(signum, frame):
+    sys.exit(1)
 
 ################################
-def  cmpkey(S):
-##'2048 SHA256:D3a96KoHgCN+UKFGYNGpzH2wo7nWRftEJYwZvK5ugK8 root@gp (RSA)\n
-## 2048 SHA256:Na1vDWrXks6e0hA3VBra5G/5+LzofAC+FCCSr/Yyxo0 test@gp (RSA)\n'
-##'2048 83:fa:e0:ee:75:df:d4:b6:ef:02:f1:3e:bb:e7:65:06 a.pub (RSA)\n
-## 2048 8c:ad:c0:aa:f0:86:fe:9a:94:54:53:c2:88:a8:ee:7e b.pub (RSA)'
-   try:
-      L =S.split('\n')
-      if len(L) != 2:
-         return  False
-      K,P = L
-      K = K.split()
-      P = P.split()
-      return  (K[1] == P[1])
-   except Exception as Err:
-      return  False
-
-################
-#    Returns the content of if_rsa.pub for the generated or existing key pair.
-def  LocalgetpubID(keyfile):
-    f = None;
+def  interactive(sshsession):
     try:
+        import readline
+        # Read in the saved command history, if any
+        histfile = Path(gargv['homeDir'])/ '.pyssh_his'
+        readline.set_history_length(500)
         try:
-            f = open(keyfile, 'r');
-            return f.readline().strip()
+            readline.read_history_file(histfile)
         except IOError:
-            sys.exit(f'[ERROR] ssh-keygen failed - unable to read the generated file {keyfile}')
-    finally:
-        if f: f.close()
-
-################
-### Append the id_rsa.pub value provided to authorized_keys
-def  LocalauthorizeID(pubkey,authorizefile):
-    # Check the current authorized_keys file for the localID
-    f = None
-    try:
+            pass
+        # MPP-4054 - let's check the permissons before we register
         try:
-            f = open(authorizefile, 'a+')
-            f.seek(0)
-            for line in f.readlines():
-                if line.strip() == pubkey:
-                    # The localID is already in authorizedKeys; no need to add
-                    return
-            f.write(pubkey)
-            f.write('\n')
-        except IOError:
-            sys.exit(f'[ERROR] ssh-keygen failed - unable to read the generated file {keyfile}')
-    finally:
-        if f: f.close()
+            f = open(histfile, 'a')
+            atexit.register(readline.write_history_file, histfile)
+            f.close()
+        except IOError as Err:
+            print(f'\n[WARN] Unable to write to pyssh history file: \'{histfile}\'. Please check permissions.')
 
-################
-def  genLocalsshfile():
-#  step 2
-#
-#    Creates an SSH id_rsa key pair for for the current user if not already available
-#    and appends the local id_rsa.pub key to the local authorized_keys file
-#    and add local host in local known_hosts file.
-#
-    print (f'\r\n[STEP 2 of 3] create local ID and authorize on local host')
-## .ssh
-    sshDir = Path(gargv['homeDir']) / './.ssh/'
-    authorized_keys_File = Path(sshDir) / gargv['fAuthorized_keys']
-    known_hosts_File = Path(sshDir) / gargv['fKnown_hosts']
-    id_key_File = Path(sshDir) / gargv['fId_key']
-    id_key_pub_File = Path(sshDir) / gargv['fId_key_pub']
-    cmdLOCALfileinit = f'mkdir -p {sshDir}; \
-         chmod 0700 {sshDir}; \
-         touch {authorized_keys_File}; \
-         touch {known_hosts_File}; \
-         chmod 0600 {authorized_keys_File}; \
-         chmod 0644 {known_hosts_File};'
-    print(f'Local Host: init directory in the {gargv["curUser"]}\'s home directory: {gargv["homeDir"]}');
-    rc,rs = runlocalcmd(cmdLOCALfileinit)
-    if rc != 0:
-        exit(f'[ERROR]: {__run__} init directory {rs}!')
+    except Exception as Err:
+        print(f'Note: command history unsupported on this machine {Err}')
 
-## public/private key
-    if (Path(id_key_File).is_file() and Path(id_key_pub_File).is_file()):
-       cmdLOCALkeycheck = f'ssh-keygen -yle -f {id_key_File}; ssh-keygen -yle -f {id_key_pub_File}'
-       rc,rs = runlocalcmd(cmdLOCALkeycheck)
-       if ((rc !=0) or (rc == 0 and not cmpkey(rs))):
-           cmdLOCALkeyrm = f'rm -rf {id_key_File} {id_key_pub_File} '
-           rc,rs = runlocalcmd(cmdLOCALkeyrm)
-           if rc != 0:
-               exit(f'[ERROR]: {__run__} remove key file {rs}!')
-           print(f'Local Host:  generation public/private key(type:{gargv["typ"]}) in {gargv["curUser"]}\'s home directory: {gargv["homeDir"]}');
-           cmdLOCALkeygen = f'ssh-keygen -t {gargv["typ"]} -N "" -f {id_key_File} </dev/null'
-           rc,rs = runlocalcmd(cmdLOCALkeygen)
-           if rc != 0:
-              exit(f'[ERROR]: {__run__} generation public/private key {rs}!')
-    else:
-        cmdLOCALkeyrm = f'rm -rf {id_key_File}  {id_key_pub_File} '
-        rc,rs = runlocalcmd(cmdLOCALkeyrm)
-        if rc != 0:
-           exit(f'[ERROR]: {__run__} remove key file {rs}!')
-        print(f'Local Host:  generation public/private key(type:{gargv["typ"]}) in {gargv["curUser"]}\'s home directory: {gargv["homeDir"]}');
-        cmdLOCALkeygen = f'ssh-keygen -t {gargv["typ"]} -N "" -f {id_key_File} </dev/null'
-        rc,rs = runlocalcmd(cmdLOCALkeygen)
-        if rc != 0:
-           exit(f'[ERROR]: {__run__} generation public/private {gargv["typ"]} key pair {rs}!')
-
-## authorized_keys
-    gargv['pubKey'] = LocalgetpubID(id_key_pub_File)
-    LocalauthorizeID(gargv['pubKey'],authorized_keys_File)
-
-## login local host
-    Lssh = ssh_connect(gargv['hostname'],gargv['curUser'],'password')
-    logined = Lssh.rssh
-    Lssh.close()
-    if not logined:
-        exit(f'[ERROR]: {__run__} login local error!')
-
-
-## known_hosts
-#    cmdLOCALkeyscan = f'ssh-keyscan -t {gargv["typ"]} localhost 127.0.0.1 < /dev/null >> {known_hosts_File} '
-
-################################
-def  genRemotesshfile():
-#  step 3
-#
-#    Creates an SSH id_rsa key pair for for the current user if not already available
-#    and appends the local id_rsa.pub key to the remote authorized_keys file.
-#
-    print (f'\r\n[STEP 3 of 3] create local ID and authorize on each remote host')
-    rpasswd = ''
-    Ruser = gargv['curUser']
-    for Rhost in gargv['remoteHosts']:
-       Rssh = ssh_connect(Rhost,Ruser,rpasswd,True)
-       if not Rssh.rssh:
-           print (f'***{Rhost} login error!')
-           continue
-       print (f'***{Rhost} login success!')
-       rpasswd = Rssh.__msg__
-
-## gen temp file(error file)
-       cmdREMOTEfiletmp = f'mktemp -t  {__app__}.err.XXXX'
-       rs = Rssh.runcmd(cmdREMOTEfiletmp)
-       errfile = rs
-
-       redirect1 = f'</dev/null >/dev/null 2>{errfile}'
-       redirect2 = f'</dev/null >/dev/null 2>>{errfile}'
-       cmdREMOTEchkres = f'cat {errfile}'
-       cmdREMOTErmtmp = f'rm -rf  {errfile}'
-
-## get  current user's Home
-       cmdREMOTEfilehome = f'getent passwd {Ruser} | cut -d : -f 6' #eval echo "~$USER"
-       rs = Rssh.runcmd(cmdREMOTEfilehome)
-       homeDir = rs
-
-## .ssh init
-       sshDir = Path(homeDir) / './.ssh/'
-       authorized_keys_File = Path(sshDir) / gargv['fAuthorized_keys']
-       known_hosts_File = Path(sshDir) / gargv['fKnown_hosts']
-       cmdREMOTEfileinit = f'mkdir -p {sshDir} {redirect1}; \
-            chmod 0700 {sshDir} {redirect2}; \
-            touch {authorized_keys_File} {redirect2}; \
-            touch {known_hosts_File} {redirect2}; \
-            chmod 0600 {authorized_keys_File} {redirect2}; \
-            chmod 0644 {known_hosts_File} {redirect2};'
-       print(f'{Rhost} Host: init directory in the {Ruser}\'s home directory: {homeDir}');
-       rs = Rssh.runcmd(cmdREMOTEfileinit)
-       rs = Rssh.runcmd(cmdREMOTEchkres)
-       if len(rs)>0:
-           print(f'***remote host {Rhost} init directory {rs}!')
-           continue
-
-## authorized_keys
-       cmdREMOTEauthorized =f'cat {authorized_keys_File}'
-       rs = Rssh.runcmd(cmdREMOTEauthorized)
-       found = False
-       for line in rs.split('\r\n'):
-           if line.strip() == gargv['pubKey']:
-               found = True
-               break
-
-       if not found:
-           cmdREMOTEauthorized =f'cat >> {authorized_keys_File} <<EOF \n{gargv["pubKey"]}\nEOF'
-           rs = Rssh.runcmd(cmdREMOTEauthorized)
-
-       rs = Rssh.runcmd(cmdREMOTErmtmp)
-       Rssh.close()
+    atexit.register(sessionCleanup,sshsession=sshsession)
+    signal.signal(signal.SIGINT, sigint_handle)
+    signal.signal(signal.SIGHUP, sighup_handle)
+    while True:
+        try:
+            if not sshsession:
+                sshsession = Session()
+                sshsession.verbose = False
+                sshsession.login(gargv['remoteHosts'], gargv['curUser'], gargv['DELAY_BEFORE_SEND'], gargv['PROMPT_VALIDATION_TIMEOUT'], gargv['SYNC_RETRIES'])
+                sshsession.echoCommand = gargv['echo']
+            sshsession.cmdloop()
+        except EOF:
+            print('\n[Unexpected EOF from some hosts...]')
+            pass
+        except Session.SessionCmdExit:
+            print()
+            break
+        except Session.SessionError as Err:
+            print(f'Error: {Err}')
+            pass
+        except KeyboardInterrupt:
+            print(f'\n[Interrupt...]')
+            sshsession.reset()
+            pass
 
 ################################################################
 try:
+    sshsession = None
     collectHosts()
-    genLocalsshfile()
-    genRemotesshfile()
+    if gargv['cmd']:
+        try:
+            sshsession = Session()
+            sshsession.verbose = False
+            sshsession.login(gargv['remoteHosts'], gargv['curUser'], gargv['DELAY_BEFORE_SEND'], gargv['PROMPT_VALIDATION_TIMEOUT'], gargv['SYNC_RETRIES'])
+            sshsession.echoCommand = gargv['echo']
+            output = sshsession.executeCommand(gargv['cmd'])
+            sshsession.writeCommandOutput(output)
+            if sshsession.verbose: print('[INFO] completed successfully')
+            sys.stdout.flush()
+        except Session.SessionError as Err:
+            print(f'Error: {Err}')
+            pass
+
+    else:
+        interactive(sshsession)
+
+    return_code = sessionCleanup(sshsession)
+    sys.exit(return_code)
 
 except KeyboardInterrupt:
     sys.exit('\n\nInterrupted...')
 
 finally:
-    pass
+    sessionCleanup(sshsession)
