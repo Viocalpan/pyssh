@@ -18,8 +18,7 @@ if libs_path.exists():
     sys.path.append(str(libs_path))
 
 try:
-    import time #now
-    import pwd #CurUser
+    import pwd #curUser
     import socket
     import subprocess
     import getpass
@@ -41,7 +40,7 @@ appDesc = '  -- exchange ssh public keys among friends from greenplum\'s gpssh-e
 
 gargv = {'typ':'rsa', 'fId_key':'id_rsa', 'fId_key_pub':'id_rsa.pub', 'fAuthorized_keys':'authorized_keys', 
         'fKnown_hosts':'known_hosts', 'pubKey':'',
-        'allHosts': [], 'remoteHosts':[], 'hostname':None, 'CurUser':None, 'homeDir':None}
+        'allHosts': [], 'remoteHosts':[], 'hostname':None, 'curUser':None, 'homeDir':None}
 
 ################################################################
 def is_file(path):
@@ -69,14 +68,6 @@ if __run__ !=  __app__:
    sys.exit(f'[ERROR]: {__run__} Can\'t Run, Please Upgrade Python Installed On System!')
 
 ################################################################################
-def now(tm=time.time()):
-  return  time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(tm))
-
-########
-def h_key(D, K):
-   return (K in D.keys())
-
-########
 def to_str(S):
   if isinstance(S, bytes):
       value = S.decode('utf-8')
@@ -175,7 +166,7 @@ def  collectHosts():
 
 # current user & local hostname & ip
     gargv['hostname'] = socket.gethostname()
-    gargv['CurUser'] = pwd.getpwuid(os.getuid()).pw_name
+    gargv['curUser'] = pwd.getpwuid(os.getuid()).pw_name
     gargv['homeDir'] = pwd.getpwuid(os.getuid()).pw_dir #Path.home()
     LlocalHosts = []
     LlocalIP = []
@@ -277,7 +268,7 @@ def  genLocalsshfile():
          touch {known_hosts_File}; \
          chmod 0600 {authorized_keys_File}; \
          chmod 0644 {known_hosts_File};'
-    print(f'Local Host: init directory in the {gargv["CurUser"]}\'s home directory: {gargv["homeDir"]}');
+    print(f'Local Host: init directory in the {gargv["curUser"]}\'s home directory: {gargv["homeDir"]}');
     rc,rs = runlocalcmd(cmdLOCALfileinit)
     if rc != 0:
         exit(f'[ERROR]: {__run__} init directory {rs}!')
@@ -291,7 +282,7 @@ def  genLocalsshfile():
            rc,rs = runlocalcmd(cmdLOCALkeyrm)
            if rc != 0:
                exit(f'[ERROR]: {__run__} remove key file {rs}!')
-           print(f'Local Host:  generation public/private key(type:{gargv["typ"]}) in {gargv["CurUser"]}\'s home directory: {gargv["homeDir"]}');
+           print(f'Local Host:  generation public/private key(type:{gargv["typ"]}) in {gargv["curUser"]}\'s home directory: {gargv["homeDir"]}');
            cmdLOCALkeygen = f'ssh-keygen -t {gargv["typ"]} -N "" -f {id_key_File} </dev/null'
            rc,rs = runlocalcmd(cmdLOCALkeygen)
            if rc != 0:
@@ -301,7 +292,7 @@ def  genLocalsshfile():
         rc,rs = runlocalcmd(cmdLOCALkeyrm)
         if rc != 0:
            exit(f'[ERROR]: {__run__} remove key file {rs}!')
-        print(f'Local Host:  generation public/private key(type:{gargv["typ"]}) in {gargv["CurUser"]}\'s home directory: {gargv["homeDir"]}');
+        print(f'Local Host:  generation public/private key(type:{gargv["typ"]}) in {gargv["curUser"]}\'s home directory: {gargv["homeDir"]}');
         cmdLOCALkeygen = f'ssh-keygen -t {gargv["typ"]} -N "" -f {id_key_File} </dev/null'
         rc,rs = runlocalcmd(cmdLOCALkeygen)
         if rc != 0:
@@ -312,7 +303,7 @@ def  genLocalsshfile():
     LocalauthorizeID(gargv['pubKey'],authorized_keys_File)
 
 ## login local host
-    Lssh = ssh_connect(gargv['hostname'],gargv['CurUser'],'password')
+    Lssh = ssh_connect(gargv['hostname'],gargv['curUser'],'password')
     logined = Lssh.rssh
     Lssh.close()
     if not logined:
@@ -331,7 +322,7 @@ def  genRemotesshfile():
 #
     print (f'\r\n[STEP 3 of 3] create local ID and authorize on each remote host')
     rpasswd = ''
-    Ruser = gargv['CurUser']
+    Ruser = gargv['curUser']
     for Rhost in gargv['remoteHosts']:
        Rssh = ssh_connect(Rhost,Ruser,rpasswd,True)
        if not Rssh.rssh:
