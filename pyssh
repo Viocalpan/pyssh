@@ -26,7 +26,6 @@ try:
     import socket
     import atexit
     import signal
-    import socket
     import subprocess
     import pexpect #ssh ptyprocess
     import pxssh_wrapper
