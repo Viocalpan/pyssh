@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import sys
+import os
+if sys.version_info < (3, 6, 0):
+   sys.exit(f'[ERROR]: {__file__} Can\'t Run, Please Upgrade Python Installed On System!')
+
+if not ('posix' in sys.builtin_module_names):
+   sys.exit(f'[ERROR]: {__file__} Can\'t Run, Please Run On POSIX OS System!')
+
+from  pathlib import Path
+from  argparse import ArgumentParser, ArgumentTypeError
+
+root_path = Path(sys.argv[0]).resolve().parent
+libs_path = Path(root_path) / 'lib'
+if libs_path.exists():
+    sys.path.append(str(libs_path))
+
+try:
+    import time #now
+    import pwd #CurUser
+    import socket
+    import subprocess
+except ImportError as Err:
+    sys.exit(f'[ERROR]: unable to import module: {Err}')
+
+############################################################
+__author__ = 'Viocal Pan <viocal@qq.com>'
+__run__ = 'pyscp.py'  #os.path.splitext(__file__)[0]
+__app__ = Path(__run__).stem
+__path__ = str(root_path)
+__run__  = Path(sys.argv[0]).stem
+
+appName = __app__
+appVer = '0.6.0'
+appPath = __path__
+appDesc = '  -- scp to multiple hosts at once from greenplum\'s gpscp'
+
+gargv = {'allHosts': [], 'remoteHosts':[], 'hostname':None, 'CurUser':None, 'char':'=', 'dir':False}
+
+################################################################
+def is_file(path):
+    if not Path(path).is_file():
+        raise ArgumentTypeError('[ERROR]: Provided file is not a file: {}'.format(path))
+    return  str(Path(path).resolve())
+
+################
+
+cmdarg = None
+def  parseargs():
+    global cmdarg
+    parser = ArgumentParser(prog=appName, description=''.join((appName,appDesc)))
+    parser.add_argument('-ver', action='version',
+             version = f'{appName}{appDesc} version:[{appVer}]')
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('-a', '--add', dest='addhost', nargs='+',
+             help = 'the new host to connect to(multiple -a is okay)')
+    group.add_argument('-f', '--file', dest='allhost', type=is_file,
+             help = 'a file listing all new hosts to connect to')
+    parser.add_argument('-r', dest='dir', action='store_true', default=gargv['dir'],
+             help = 'recursively copy entire directories')
+    parser.add_argument('filepath', nargs='+',
+             help='fle1 file2 ... filen for transport to remote')
+    parser.add_argument('-c', dest='char', default=gargv['char'], #type = is_file,
+             help = f'character to be substitute as hostname [default {gargv["char"]} ]')
+    cmdarg = parser.parse_args()
+
+parseargs()
+
+if __run__ !=  __app__:
+   sys.exit(f'[ERROR]: {__run__} Can\'t Run, Please Upgrade Python Installed On System!')
+
+################################################################################
+def now(tm=time.time()):
+  return  time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(tm))
+
+########
+def h_key(D, K):
+   return (K in D.keys())
+
+########
+def to_str(S):
+  if isinstance(S, bytes):
+      value = S.decode('utf-8')
+  else:
+      value = S
+  return value
+
+########
+def readfline(filename):
+   filename = Path(filename)
+   LineV = []
+   if filename.is_file():
+      filename = str(filename.resolve())
+      f = None
+      try:
+         f = open(filename, 'r')
+         lines = f.readlines()
+         for line in lines:
+            line = line.strip()
+            if not len(line):
+               continue
+            L = line.split('#')[0]
+            L = L.strip()
+            if not len(L):
+               continue
+            V = L.split()[0]
+            V = V.strip()
+            if V: LineV.append(V)
+      except Exception as Err:
+         pass
+      finally:
+         if f: f.close()
+         return LineV
+
+########
+def runlocalcmd(cmdstr,cwd='.'):
+     p = subprocess.Popen(cmdstr, cwd=cwd, stdout = subprocess.PIPE, stderr = subprocess.PIPE, shell=True)
+     out,err = p.communicate()
+     retcode = p.returncode
+     if not err:
+        return  retcode, to_str(out).strip()
+     else:
+        return  retcode, to_str(err).strip()
+
+################################################################################
+if cmdarg.addhost:
+    gargv['allHosts'].extend(cmdarg.addhost)
+if cmdarg.allhost:
+    gargv['allHosts'].extend(readfline(cmdarg.allhost))
+
+gargv['char'] = cmdarg.char[0]
+gargv['dir'] = cmdarg.dir
+
+gargv['allHosts'] = list(set(gargv['allHosts']))
+gargv['filepath'] = cmdarg.filepath
+
+################################################################
+def  collectHosts():
+######################
+#  step 1
+#
+#    Colection Local Hostname & IP
+#    and appends Remotehost Lists.
+#
+    print(f'\r\n[STEP 1 of 2] create hostlist and local hostname and remote hostname')
+
+# current user & local hostname & ip
+    gargv['hostname'] = socket.gethostname()
+    gargv['CurUser'] = pwd.getpwuid(os.getuid()).pw_name
+    LlocalHosts = []
+    LlocalIP = []
+
+# collect local ip
+# ip -o -4 addr show up primary scope global | awk '{print $4}'|cut -f1 -d"/"
+# ip addr show |grep -iw inet |grep -iv 127.0.0.1| awk '{print $2}'|cut -f1 -d"/"
+# ifconfig |grep -iw inet|grep -iv 127.0.0.1 |awk '{print $2}'|cut -f2 -d":"
+
+    cmdLOCALipGet1 = 'ip -o -4 addr show up primary scope global | awk \'{print $4}\'|cut -f1 -d"/"'
+    cmdLOCALipGet2 = 'ifconfig |grep -iw inet|grep -iv 127.0.0.1 |awk \'{print $2}\'|cut -f2 -d":"'
+    rc,rs = runlocalcmd(f'{cmdLOCALipGet1} || {cmdLOCALipGet2}')
+    if rc != 0:
+       exit(f'[ERROR]: {__run__} collect local ip {rs}!')
+    LlocalIP = rs.split()
+    if len(LlocalIP) == 0:
+        exit(f'[ERROR]: {__run__}  can\'t get local ip!')
+
+    LlocalHosts.append(gargv['hostname'])
+    for host in gargv['allHosts']:
+        try:
+            ip = socket.gethostbyname(host)
+            if (ip in LlocalIP):
+                LlocalHosts.append(host)
+                continue
+        except ImportError as Err:
+            continue
+        gargv['remoteHosts'].append(host)
+    LlocalHosts = list(set(LlocalHosts))
+    if len(LlocalHosts) > 0:
+       gargv['remoteHosts'].append(LlocalHosts[0])
+"""
+    Lfilepath = []
+    for filepath in gargv['filepath']:
+       if Path(filepath).exists():
+          Lfilepath.append(filepath)
+    Lfilepath = list(set(Lfilepath))
+    gargv['filepath'] = Lfilepath
+"""
+################################
+def  genscpcmd():
+#  step 2
+#
+#    Creates an SSH id_rsa key pair for for the current user if not already available
+#    and appends the local id_rsa.pub key to the remote authorized_keys file.
+#
+    print (f'\r\n[STEP 2 of 2] transport on each remote host')
+
+    scp = 'scp -o "BatchMode yes" -o "StrictHostKeyChecking no"'
+    if gargv['dir']: scp += ' -r'
+
+    for Rhost in gargv['remoteHosts']:
+        cmd = scp + ' '
+        for f in gargv['filepath']:
+            cmd += f.replace(gargv['char'], f'  {Rhost}') + '  '
+        rc,rs = runlocalcmd(cmd)
+        if rc != 0:
+           print(f'[ERROR]: {__run__} to {Rhost} {rs}!')
+        print (f'***{Rhost}  transport success')
+
+################################################################
+try:
+    collectHosts()
+    genscpcmd()
+
+except KeyboardInterrupt:
+    sys.exit('\n\nInterrupted...')
+
+finally:
+    pass
