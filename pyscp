@@ -18,8 +18,7 @@ if libs_path.exists():
     sys.path.append(str(libs_path))
 
 try:
-    import time #now
-    import pwd #CurUser
+    import pwd #curUser
     import socket
     import subprocess
 except ImportError as Err:
@@ -37,7 +36,7 @@ appVer = '0.6.0'
 appPath = __path__
 appDesc = '  -- scp to multiple hosts at once from greenplum\'s gpscp'
 
-gargv = {'allHosts': [], 'remoteHosts':[], 'hostname':None, 'CurUser':None, 'char':'=', 'dir':False}
+gargv = {'allHosts': [], 'remoteHosts':[], 'hostname':None, 'curUser':None, 'char':'=', 'dir':False}
 
 ################################################################
 def is_file(path):
@@ -72,14 +71,6 @@ if __run__ !=  __app__:
    sys.exit(f'[ERROR]: {__run__} Can\'t Run, Please Upgrade Python Installed On System!')
 
 ################################################################################
-def now(tm=time.time()):
-  return  time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(tm))
-
-########
-def h_key(D, K):
-   return (K in D.keys())
-
-########
 def to_str(S):
   if isinstance(S, bytes):
       value = S.decode('utf-8')
@@ -148,7 +139,7 @@ def  collectHosts():
 
 # current user & local hostname & ip
     gargv['hostname'] = socket.gethostname()
-    gargv['CurUser'] = pwd.getpwuid(os.getuid()).pw_name
+    gargv['curUser'] = pwd.getpwuid(os.getuid()).pw_name
     LlocalHosts = []
     LlocalIP = []
 
