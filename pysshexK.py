@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import sys
+import os
+if sys.version_info < (3, 6, 0):
+   sys.exit(f'[ERROR]: {__file__} Can\'t Run, Please Upgrade Python Installed On System!')
+
+if not ('posix' in sys.builtin_module_names):
+   sys.exit(f'[ERROR]: {__file__} Can\'t Run, Please Run On POSIX OS System!')
+
+from  pathlib import Path
+from  argparse import ArgumentParser, ArgumentTypeError
+
+root_path = Path(sys.argv[0]).resolve().parent
+libs_path = Path(root_path) / 'lib'
+if libs_path.exists():
+    sys.path.append(str(libs_path))
+
+try:
+    import time #now
+    import pwd #CurUser
+    import socket
+    import subprocess
+    import getpass
+    from pexpect import pxssh #ssh ptyprocess
+except ImportError as Err:
+    sys.exit(f'[ERROR]: unable to import module: {Err}')
+
+############################################################
+__author__ = 'Viocal Pan <viocal@qq.com>'
+__run__ = 'pysshexK.py'  #os.path.splitext(__file__)[0]
+__app__ = Path(__run__).stem
+__path__ = str(root_path)
+__run__  = Path(sys.argv[0]).stem
+
+appName = __app__
+appVer = '0.6.0'
+appPath = __path__
+appDesc = '  -- exchange ssh public keys among friends from greenplum\'s gpssh-exkeys'
+
+gargv = {'typ':'rsa', 'fId_key':'id_rsa', 'fId_key_pub':'id_rsa.pub', 'fAuthorized_keys':'authorized_keys', 
+        'fKnown_hosts':'known_hosts', 'pubKey':'',
+        'allHosts': [], 'remoteHosts':[], 'hostname':None, 'CurUser':None, 'homeDir':None}
+
+################################################################
+def is_file(path):
+    if not Path(path).is_file():
+        raise ArgumentTypeError('[ERROR]: Provided file is not a file: {}'.format(path))
+    return  str(Path(path).resolve())
+
+################
+cmdarg = None
+def  parseargs():
+    global cmdarg
+    parser = ArgumentParser(prog=appName, description=''.join((appName,appDesc)))
+    parser.add_argument('-ver', action='version',
+             version = f'{appName}{appDesc} version:[{appVer}]')
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('-a', '--add', dest='addhost', nargs='+',
+             help = 'the new host to connect to(multiple -a is okay)')
+    group.add_argument('-f', '--file', dest='allhost', type=is_file,
+             help = 'a file listing all new hosts to connect to')
+    cmdarg = parser.parse_args()
+
+parseargs()
+
+if __run__ !=  __app__:
+   sys.exit(f'[ERROR]: {__run__} Can\'t Run, Please Upgrade Python Installed On System!')
+
+################################################################################
+def now(tm=time.time()):
+  return  time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(tm))
+
+########
+def h_key(D, K):
+   return (K in D.keys())
+
+########
+def to_str(S):
+  if isinstance(S, bytes):
+      value = S.decode('utf-8')
+  else:
+      value = S
+  return value
+
+########
+def readfline(filename):
+   filename = Path(filename)
+   LineV = []
+   if filename.is_file():
+      filename = str(filename.resolve())
+      f = None
+      try:
+         f = open(filename, 'r')
+         lines = f.readlines()
+         for line in lines:
+            line = line.strip()
+            if not len(line):
+               continue
+            L = line.split('#')[0]
+            L = L.strip()
+            if not len(L):
+               continue
+            V = L.split()[0]
+            V = V.strip()
+            if V: LineV.append(V)
+      except Exception as Err:
+         pass
+      finally:
+         if f: f.close()
+         return LineV
+
+########
+def runlocalcmd(cmdstr,cwd='.'):
+     p = subprocess.Popen(cmdstr, cwd=cwd, stdout = subprocess.PIPE, stderr = subprocess.PIPE, shell=True)
+     out,err = p.communicate()
+     retcode = p.returncode
+     if not err:
+        return  retcode, to_str(out).strip()
+     else:
+        return  retcode, to_str(err).strip()
+
+########
+class ssh_connect():
+    def  __init__(self, hostname,username,passwd='',pw=None):
+       self.rssh = None
+       try:
+          self.rssh = pxssh.pxssh(echo=False)
+          if not passwd:
+              passwd = getpass.getpass('password: ')
+          self.rssh.login(hostname, username, passwd, original_prompt='[$#>]')
+          if pw:
+              self.__msg__ = passwd
+          self.msg = f'{username}@{hostname}'
+       except pxssh.ExceptionPxssh as Err:
+           self.rssh = None
+           self.msg = f'{Err}' # 'password refused'
+            #self.glog.error(Err)
+    def  runcmd(self,cmd):
+       if self.rssh:
+           self.rssh.sendline(cmd)
+           self.rssh.prompt()
+           rs = to_str(self.rssh.before)
+           L = len(cmd)
+           if cmd == rs[0:L]:
+               rs = rs[L:]
+           return  rs.strip()
+    def  close(self):
+       if self.rssh:
+           self.rssh.sendline('history -c')
+           self.rssh.logout()
+           self.rssh = None
+           if hasattr(self, '__msg__'):
+               del self.__msg__
+           self.msg = f'closed'
+
+################################################################################
+if cmdarg.addhost:
+    gargv['allHosts'].extend(cmdarg.addhost)
+if cmdarg.allhost:
+    gargv['allHosts'].extend(readfline(cmdarg.allhost))
+
+gargv['allHosts'] = list(set(gargv['allHosts']))
+
+################################################################
+def  collectHosts():
+######################
+#  step 1
+#
+#    Colection Local Hostname & IP
+#    and appends Remotehost Lists.
+#
+    print (f'\r\n[STEP 1 of 3] create hostlist and local hostname and remote hostname')
+
+# current user & local hostname & ip
+    gargv['hostname'] = socket.gethostname()
+    gargv['CurUser'] = pwd.getpwuid(os.getuid()).pw_name
+    gargv['homeDir'] = pwd.getpwuid(os.getuid()).pw_dir #Path.home()
+    LlocalHosts = []
+    LlocalIP = []
+    
+# collect local ip
+# ip -o -4 addr show up primary scope global | awk '{print $4}'|cut -f1 -d"/"
+# ip addr show |grep -iw inet |grep -iv 127.0.0.1| awk '{print $2}'|cut -f1 -d"/"
+# ifconfig |grep -iw inet|grep -iv 127.0.0.1 |awk '{print $2}'|cut -f2 -d":"
+
+    cmdLOCALipGet1 = 'ip -o -4 addr show up primary scope global | awk \'{print $4}\'|cut -f1 -d"/"'
+    cmdLOCALipGet2 = 'ifconfig |grep -iw inet|grep -iv 127.0.0.1 |awk \'{print $2}\'|cut -f2 -d":"'
+    rc,rs = runlocalcmd(f'{cmdLOCALipGet1} || {cmdLOCALipGet2}')
+    if rc != 0:
+       exit(f'[ERROR]: {__run__} collect local ip {rs}!')
+    LlocalIP = rs.split()
+    if len(LlocalIP) == 0:
+        exit(f'[ERROR]: {__run__}  can\'t get local ip!')
+
+    LlocalHosts.append(gargv['hostname'])
+    for host in gargv['allHosts']:
+        try:
+            ip = socket.gethostbyname(host)
+            if (ip in LlocalIP):
+                LlocalHosts.append(host)
+                continue
+        except ImportError as Err:
+            continue
+        gargv['remoteHosts'].append(host)
+    LlocalHosts = list(set(LlocalHosts))
+
+################################
+def  cmpkey(S):
+##'2048 SHA256:D3a96KoHgCN+UKFGYNGpzH2wo7nWRftEJYwZvK5ugK8 root@gp (RSA)\n
+## 2048 SHA256:Na1vDWrXks6e0hA3VBra5G/5+LzofAC+FCCSr/Yyxo0 test@gp (RSA)\n'
+##'2048 83:fa:e0:ee:75:df:d4:b6:ef:02:f1:3e:bb:e7:65:06 a.pub (RSA)\n
+## 2048 8c:ad:c0:aa:f0:86:fe:9a:94:54:53:c2:88:a8:ee:7e b.pub (RSA)'
+   try:
+      L =S.split('\n')
+      if len(L) != 2:
+         return  False
+      K,P = L
+      K = K.split()
+      P = P.split()
+      return  (K[1] == P[1])
+   except Exception as Err:
+      return  False
+
+################
+#    Returns the content of if_rsa.pub for the generated or existing key pair.
+def  LocalgetpubID(keyfile):
+    f = None;
+    try:
+        try:
+            f = open(keyfile, 'r');
+            return f.readline().strip()
+        except IOError:
+            sys.exit(f'[ERROR] ssh-keygen failed - unable to read the generated file {keyfile}')
+    finally:
+        if f: f.close()
+
+################
+### Append the id_rsa.pub value provided to authorized_keys
+def  LocalauthorizeID(pubkey,authorizefile):
+    # Check the current authorized_keys file for the localID
+    f = None
+    try:
+        try:
+            f = open(authorizefile, 'a+')
+            f.seek(0)
+            for line in f.readlines():
+                if line.strip() == pubkey:
+                    # The localID is already in authorizedKeys; no need to add
+                    return
+            f.write(pubkey)
+            f.write('\n')
+        except IOError:
+            sys.exit(f'[ERROR] ssh-keygen failed - unable to read the generated file {keyfile}')
+    finally:
+        if f: f.close()
+
+################
+def  genLocalsshfile():
+#  step 2
+#
+#    Creates an SSH id_rsa key pair for for the current user if not already available
+#    and appends the local id_rsa.pub key to the local authorized_keys file
+#    and add local host in local known_hosts file.
+#
+    print (f'\r\n[STEP 2 of 3] create local ID and authorize on local host')
+## .ssh
+    sshDir = Path(gargv['homeDir']) / './.ssh/'
+    authorized_keys_File = Path(sshDir) / gargv['fAuthorized_keys']
+    known_hosts_File = Path(sshDir) / gargv['fKnown_hosts']
+    id_key_File = Path(sshDir) / gargv['fId_key']
+    id_key_pub_File = Path(sshDir) / gargv['fId_key_pub']
+    cmdLOCALfileinit = f'mkdir -p {sshDir}; \
+         chmod 0700 {sshDir}; \
+         touch {authorized_keys_File}; \
+         touch {known_hosts_File}; \
+         chmod 0600 {authorized_keys_File}; \
+         chmod 0644 {known_hosts_File};'
+    print(f'Local Host: init directory in the {gargv["CurUser"]}\'s home directory: {gargv["homeDir"]}');
+    rc,rs = runlocalcmd(cmdLOCALfileinit)
+    if rc != 0:
+        exit(f'[ERROR]: {__run__} init directory {rs}!')
+
+## public/private key
+    if (Path(id_key_File).is_file() and Path(id_key_pub_File).is_file()):
+       cmdLOCALkeycheck = f'ssh-keygen -yle -f {id_key_File}; ssh-keygen -yle -f {id_key_pub_File}'
+       rc,rs = runlocalcmd(cmdLOCALkeycheck)
+       if ((rc !=0) or (rc == 0 and not cmpkey(rs))):
+           cmdLOCALkeyrm = f'rm -rf {id_key_File} {id_key_pub_File} '
+           rc,rs = runlocalcmd(cmdLOCALkeyrm)
+           if rc != 0:
+               exit(f'[ERROR]: {__run__} remove key file {rs}!')
+           print(f'Local Host:  generation public/private key(type:{gargv["typ"]}) in {gargv["CurUser"]}\'s home directory: {gargv["homeDir"]}');
+           cmdLOCALkeygen = f'ssh-keygen -t {gargv["typ"]} -N "" -f {id_key_File} </dev/null'
+           rc,rs = runlocalcmd(cmdLOCALkeygen)
+           if rc != 0:
+              exit(f'[ERROR]: {__run__} generation public/private key {rs}!')
+    else:
+        cmdLOCALkeyrm = f'rm -rf {id_key_File}  {id_key_pub_File} '
+        rc,rs = runlocalcmd(cmdLOCALkeyrm)
+        if rc != 0:
+           exit(f'[ERROR]: {__run__} remove key file {rs}!')
+        print(f'Local Host:  generation public/private key(type:{gargv["typ"]}) in {gargv["CurUser"]}\'s home directory: {gargv["homeDir"]}');
+        cmdLOCALkeygen = f'ssh-keygen -t {gargv["typ"]} -N "" -f {id_key_File} </dev/null'
+        rc,rs = runlocalcmd(cmdLOCALkeygen)
+        if rc != 0:
+           exit(f'[ERROR]: {__run__} generation public/private {gargv["typ"]} key pair {rs}!')
+
+## authorized_keys
+    gargv['pubKey'] = LocalgetpubID(id_key_pub_File)
+    LocalauthorizeID(gargv['pubKey'],authorized_keys_File)
+
+## login local host
+    Lssh = ssh_connect(gargv['hostname'],gargv['CurUser'],'password')
+    logined = Lssh.rssh
+    Lssh.close()
+    if not logined:
+        exit(f'[ERROR]: {__run__} login local error!')
+
+
+## known_hosts
+#    cmdLOCALkeyscan = f'ssh-keyscan -t {gargv["typ"]} localhost 127.0.0.1 < /dev/null >> {known_hosts_File} '
+
+################################
+def  genRemotesshfile():
+#  step 3
+#
+#    Creates an SSH id_rsa key pair for for the current user if not already available
+#    and appends the local id_rsa.pub key to the remote authorized_keys file.
+#
+    print (f'\r\n[STEP 3 of 3] create local ID and authorize on each remote host')
+    rpasswd = ''
+    Ruser = gargv['CurUser']
+    for Rhost in gargv['remoteHosts']:
+       Rssh = ssh_connect(Rhost,Ruser,rpasswd,True)
+       if not Rssh.rssh:
+           print (f'***{Rhost} login error!')
+           continue
+       print (f'***{Rhost} login success!')
+       rpasswd = Rssh.__msg__
+
+## gen temp file(error file)
+       cmdREMOTEfiletmp = f'mktemp -t  {__app__}.err.XXXX'
+       rs = Rssh.runcmd(cmdREMOTEfiletmp)
+       errfile = rs
+
+       redirect1 = f'</dev/null >/dev/null 2>{errfile}'
+       redirect2 = f'</dev/null >/dev/null 2>>{errfile}'
+       cmdREMOTEchkres = f'cat {errfile}'
+       cmdREMOTErmtmp = f'rm -rf  {errfile}'
+
+## get  current user's Home
+       cmdREMOTEfilehome = f'getent passwd {Ruser} | cut -d : -f 6' #eval echo "~$USER"
+       rs = Rssh.runcmd(cmdREMOTEfilehome)
+       homeDir = rs
+
+## .ssh init
+       sshDir = Path(homeDir) / './.ssh/'
+       authorized_keys_File = Path(sshDir) / gargv['fAuthorized_keys']
+       known_hosts_File = Path(sshDir) / gargv['fKnown_hosts']
+       cmdREMOTEfileinit = f'mkdir -p {sshDir} {redirect1}; \
+            chmod 0700 {sshDir} {redirect2}; \
+            touch {authorized_keys_File} {redirect2}; \
+            touch {known_hosts_File} {redirect2}; \
+            chmod 0600 {authorized_keys_File} {redirect2}; \
+            chmod 0644 {known_hosts_File} {redirect2};'
+       print(f'{Rhost} Host: init directory in the {Ruser}\'s home directory: {homeDir}');
+       rs = Rssh.runcmd(cmdREMOTEfileinit)
+       rs = Rssh.runcmd(cmdREMOTEchkres)
+       if len(rs)>0:
+           print(f'***remote host {Rhost} init directory {rs}!')
+           continue
+
+## authorized_keys
+       cmdREMOTEauthorized =f'cat {authorized_keys_File}'
+       rs = Rssh.runcmd(cmdREMOTEauthorized)
+       found = False
+       for line in rs.split('\r\n'):
+           if line.strip() == gargv['pubKey']:
+               found = True
+               break
+
+       if not found:
+           cmdREMOTEauthorized =f'cat >> {authorized_keys_File} <<EOF \n{gargv["pubKey"]}\nEOF'
+           rs = Rssh.runcmd(cmdREMOTEauthorized)
+
+       rs = Rssh.runcmd(cmdREMOTErmtmp)
+       Rssh.close()
+
+################################################################
+try:
+    collectHosts()
+    genLocalsshfile()
+    genRemotesshfile()
+
+except KeyboardInterrupt:
+    sys.exit('\n\nInterrupted...')
+
+finally:
+    pass
