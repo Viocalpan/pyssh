@@ -9,22 +9,16 @@ if sys.version_info < (3, 6, 0):
 if not ('posix' in sys.builtin_module_names):
    sys.exit(f'[ERROR]: {__file__} Can\'t Run, Please Run On POSIX OS System!')
 
+
+import pwd
+import socket
+import subprocess
 from  pathlib import Path
 from  argparse import ArgumentParser, ArgumentTypeError
 
 root_path = Path(sys.argv[0]).resolve().parent
-libs_path = Path(root_path) / 'lib'
-if libs_path.exists():
-    sys.path.append(str(libs_path))
 
-try:
-    import pwd #curUser
-    import socket
-    import subprocess
-except ImportError as Err:
-    sys.exit(f'[ERROR]: unable to import module: {Err}')
-
-############################################################
+################################################################
 __author__ = 'Viocal Pan <viocal@qq.com>'
 __run__ = 'pyscp.py'  #os.path.splitext(__file__)[0]
 __app__ = Path(__run__).stem
@@ -36,7 +30,7 @@ appVer = '0.6.0'
 appPath = __path__
 appDesc = '  -- scp to multiple hosts at once from greenplum\'s gpscp'
 
-gargv = {'allHosts': [], 'remoteHosts':[], 'hostname':None, 'curUser':None, 'char':'=', 'dir':False}
+gargv = {'allHosts': [], 'hostname':None, 'curUser':None, 'char':'=', 'dir':False}
 
 ################################################################
 def is_file(path):
@@ -45,7 +39,6 @@ def is_file(path):
     return  str(Path(path).resolve())
 
 ################
-
 cmdarg = None
 def  parseargs():
     global cmdarg
@@ -70,7 +63,7 @@ parseargs()
 if __run__ !=  __app__:
    sys.exit(f'[ERROR]: {__run__} Can\'t Run, Please Upgrade Python Installed On System!')
 
-################################################################################
+################################################################
 def to_str(S):
   if isinstance(S, bytes):
       value = S.decode('utf-8')
@@ -115,7 +108,22 @@ def runlocalcmd(cmdstr,cwd='.'):
      else:
         return  retcode, to_str(err).strip()
 
-################################################################################
+########
+def  ping(Lsthosts, port=22, timeout=2.0):
+   result = []
+   for host in Lsthosts:
+      try:
+          tcp_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          tcp_client.settimeout(timeout)
+          tcp_client.connect((host,port))
+          result.append(host)
+      except Exception as Err:
+          pass
+      finally:
+          tcp_client.close()
+   return  result
+
+################################################################
 if cmdarg.addhost:
     gargv['allHosts'].extend(cmdarg.addhost)
 if cmdarg.allhost:
@@ -130,11 +138,6 @@ gargv['filepath'] = cmdarg.filepath
 ################################################################
 def  collectHosts():
 ######################
-#  step 1
-#
-#    Colection Local Hostname & IP
-#    and appends Remotehost Lists.
-#
     print(f'\r\n[STEP 1 of 2] create hostlist and local hostname and remote hostname')
 
 # current user & local hostname & ip
@@ -142,6 +145,7 @@ def  collectHosts():
     gargv['curUser'] = pwd.getpwuid(os.getuid()).pw_name
     LlocalHosts = []
     LlocalIP = []
+    LremoteHosts = []
 
 # collect local ip
 # ip -o -4 addr show up primary scope global | awk '{print $4}'|cut -f1 -d"/"
@@ -164,33 +168,26 @@ def  collectHosts():
             if (ip in LlocalIP):
                 LlocalHosts.append(host)
                 continue
-        except ImportError as Err:
+        except Exception as Err:
             continue
-        gargv['remoteHosts'].append(host)
+        LremoteHosts.append(host)
     LlocalHosts = list(set(LlocalHosts))
     if len(LlocalHosts) > 0:
-       gargv['remoteHosts'].append(LlocalHosts[0])
-"""
-    Lfilepath = []
-    for filepath in gargv['filepath']:
-       if Path(filepath).exists():
-          Lfilepath.append(filepath)
-    Lfilepath = list(set(Lfilepath))
-    gargv['filepath'] = Lfilepath
-"""
+       LremoteHosts.append(LlocalHosts[0])
+    if len(LremoteHosts) == 0:
+        exit(f'[ERROR]: {__run__} no host to do !')
+    gargv['allHosts'] = ping(LremoteHosts)
+    if len(gargv['allHosts']) == 0:
+        exit(f'[ERROR]: {__run__} no host to do !')
+
 ################################
-def  genscpcmd():
-#  step 2
-#
-#    Creates an SSH id_rsa key pair for for the current user if not already available
-#    and appends the local id_rsa.pub key to the remote authorized_keys file.
-#
+def  transportFiles():
     print (f'\r\n[STEP 2 of 2] transport on each remote host')
 
     scp = 'scp -o "BatchMode yes" -o "StrictHostKeyChecking no"'
     if gargv['dir']: scp += ' -r'
 
-    for Rhost in gargv['remoteHosts']:
+    for Rhost in gargv['allHosts']:
         cmd = scp + ' '
         for f in gargv['filepath']:
             cmd += f.replace(gargv['char'], f'  {Rhost}') + '  '
@@ -202,7 +199,7 @@ def  genscpcmd():
 ################################################################
 try:
     collectHosts()
-    genscpcmd()
+    transportFiles()
 
 except KeyboardInterrupt:
     sys.exit('\n\nInterrupted...')
