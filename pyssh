@@ -1,21 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-
 """
-rewite greenplum tools (gpssh,gpscp,gpssh-exkeys) with python3 and remove 3th library only Dependencies pexpect
-cat  hosts
-gp
-gp2
-gp3
-gp4
-
+rewite greenplum tools(gpssh,gpscp,gpssh-exkeys) with python3 and remove 3th library only Dependencies pexpect
 ###########
 # pysshexK -f hosts
 # pyscp -f hosts /viocal/*.gz  =:/tmp
 # pyssh -f hosts
-
 """
+
 import sys
 import os
 if sys.version_info < (3, 6, 0):
@@ -24,31 +17,28 @@ if sys.version_info < (3, 6, 0):
 if not ('posix' in sys.builtin_module_names):
    sys.exit(f'[ERROR]: {__file__} Can\'t Run, Please Run On POSIX OS System!')
 
+import time
+import pwd
+import socket
+import atexit
+import signal
+import subprocess
+import threading
+import cmd
 from  pathlib import Path
 from  argparse import ArgumentParser, ArgumentTypeError
 
 root_path = Path(sys.argv[0]).resolve().parent
+
 libs_path = Path(root_path) / 'lib'
 if libs_path.exists():
     sys.path.append(str(libs_path))
-
-# disable deprecationwarnings
-import warnings
-warnings.simplefilter('ignore', DeprecationWarning)
 try:
-    import time
-    import pwd #curUser
-    import socket
-    import atexit
-    import signal
-    import subprocess
-    import threading
-    import cmd
-    from pexpect import pxssh, TIMEOUT, EOF #ssh ptyprocess
+    from pexpect import pxssh, TIMEOUT, EOF #ptyprocess
 except ImportError as Err:
     sys.exit(f'[ERROR]: unable to import module: {Err}')
 
-############################################################
+################################################################
 __author__ = 'Viocal Pan <viocal@qq.com>'
 __run__ = 'pyssh.py'  #os.path.splitext(__file__)[0]
 __app__ = Path(__run__).stem
@@ -60,7 +50,7 @@ appVer = '0.6.0'
 appPath = __path__
 appDesc = '  -- ssh access to multiple hosts at once from greenplum\'s gpssh'
 
-gargv = {'allHosts': [], 'remoteHosts':[], 'hostname':None, 'curUser':None, 'homeDir':None, 'echo': False,
+gargv = {'allHosts':[], 'hostname':None, 'curUser':None, 'homeDir':None, 'echo': False,
 	       'DELAY_BEFORE_SEND':0.05, 'PROMPT_VALIDATION_TIMEOUT':1.0, 'SYNC_RETRIES':3}
 
 ################################################################
@@ -137,7 +127,22 @@ def runlocalcmd(cmdstr,cwd='.'):
      else:
         return  retcode, to_str(err).strip()
 
-################################################################################
+########
+def  ping(Lsthosts, port=22, timeout=2.0):
+   result = []
+   for host in Lsthosts:
+      try:
+          tcp_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          tcp_client.settimeout(timeout)
+          tcp_client.connect((host,port))
+          result.append(host)
+      except Exception as Err:
+          pass
+      finally:
+          tcp_client.close()
+   return  result
+
+################################################################
 if cmdarg.addhost:
     gargv['allHosts'].extend(cmdarg.addhost)
 if cmdarg.allhost:
@@ -157,6 +162,7 @@ def  collectHosts():
     gargv['homeDir'] = pwd.getpwuid(os.getuid()).pw_dir #Path.home()
     LlocalHosts = []
     LlocalIP = []
+    LremoteHosts = []
 
 # collect local ip
 # ip -o -4 addr show up primary scope global | awk '{print $4}'|cut -f1 -d"/"
@@ -179,13 +185,17 @@ def  collectHosts():
             if (ip in LlocalIP):
                 LlocalHosts.append(host)
                 continue
-        except ImportError as Err:
+        except Exception as Err:
             continue
-        gargv['remoteHosts'].append(host)
+        LremoteHosts.append(host)
     LlocalHosts = list(set(LlocalHosts))
     if len(LlocalHosts) > 0:
-       gargv['remoteHosts'].append(LlocalHosts[0])
-
+       LremoteHosts.append(LlocalHosts[0])
+    if len(LremoteHosts) == 0:
+        exit(f'[ERROR]: {__run__} no host to do !')
+    gargv['allHosts'] = ping(LremoteHosts)
+    if len(gargv['allHosts']) == 0:
+        exit(f'[ERROR]: {__run__} no host to do !')
 ################################################################
 #
 #greenplum gppylib
@@ -488,6 +498,7 @@ class Session(cmd.Cmd):
 
 #greenplum gppylib
 ################################################################
+
 def  sessionCleanup(sshsession):
     while True:
         try:
@@ -545,7 +556,7 @@ def  interactive(sshsession):
             if not sshsession:
                 sshsession = Session()
                 sshsession.verbose = False
-                sshsession.login(gargv['remoteHosts'], gargv['curUser'], gargv['DELAY_BEFORE_SEND'], gargv['PROMPT_VALIDATION_TIMEOUT'], gargv['SYNC_RETRIES'])
+                sshsession.login(gargv['allHosts'], gargv['curUser'], gargv['DELAY_BEFORE_SEND'], gargv['PROMPT_VALIDATION_TIMEOUT'], gargv['SYNC_RETRIES'])
                 sshsession.echoCommand = gargv['echo']
             sshsession.cmdloop()
         except EOF:
@@ -570,7 +581,7 @@ try:
         try:
             sshsession = Session()
             sshsession.verbose = False
-            sshsession.login(gargv['remoteHosts'], gargv['curUser'], gargv['DELAY_BEFORE_SEND'], gargv['PROMPT_VALIDATION_TIMEOUT'], gargv['SYNC_RETRIES'])
+            sshsession.login(gargv['allHosts'], gargv['curUser'], gargv['DELAY_BEFORE_SEND'], gargv['PROMPT_VALIDATION_TIMEOUT'], gargv['SYNC_RETRIES'])
             sshsession.echoCommand = gargv['echo']
             output = sshsession.executeCommand(gargv['cmd'])
             sshsession.writeCommandOutput(output)
