@@ -4,11 +4,10 @@
 import sys
 import os
 if sys.version_info < (3, 6, 0):
-   sys.exit(f'[ERROR]: {__file__} Can\'t Run, Please Upgrade Python Installed On System!')
+    sys.exit('[ERROR]: %s Can\'t Run, Please Upgrade Python Installed On System!' %__file__)
 
 if not ('posix' in sys.builtin_module_names):
-   sys.exit(f'[ERROR]: {__file__} Can\'t Run, Please Run On POSIX OS System!')
-
+    sys.exit('[ERROR]: %s Can\'t Run, Please Run On POSIX OS System!' %__file__)
 
 import pwd
 import socket
@@ -30,7 +29,7 @@ appVer = '0.6.0'
 appPath = __path__
 appDesc = '  -- scp to multiple hosts at once from greenplum\'s gpscp'
 
-gargv = {'allHosts': [], 'hostname':None, 'curUser':None, 'char':'=', 'dir':False}
+gargv = {'allHosts': [], 'hostname':None, 'RUser':None, 'exlocal': False, 'char':'=', 'dir':False}
 
 ################################################################
 def is_file(path):
@@ -50,6 +49,10 @@ def  parseargs():
              help = 'the new host to connect to(multiple -a is okay)')
     group.add_argument('-f', '--file', dest='allhost', type=is_file,
              help = 'a file listing all new hosts to connect to')
+    parser.add_argument('-x', dest='exlocal', action='store_true', default=gargv['exlocal'],
+             help = 'exclude local host')
+    parser.add_argument('-u', '--ruser', dest='ruser',
+             help = 'then user logined remote hosts, default is current user')
     parser.add_argument('-r', dest='dir', action='store_true', default=gargv['dir'],
              help = 'recursively copy entire directories')
     parser.add_argument('filepath', nargs='+',
@@ -129,11 +132,15 @@ if cmdarg.addhost:
 if cmdarg.allhost:
     gargv['allHosts'].extend(readfline(cmdarg.allhost))
 
+gargv['exlocal'] = cmdarg.exlocal
 gargv['char'] = cmdarg.char[0]
 gargv['dir'] = cmdarg.dir
 
 gargv['allHosts'] = list(set(gargv['allHosts']))
 gargv['filepath'] = cmdarg.filepath
+
+CUser = pwd.getpwuid(os.getuid()).pw_name
+gargv['RUser'] = (cmdarg.ruser or CUser)
 
 ################################################################
 def  collectHosts():
@@ -142,7 +149,9 @@ def  collectHosts():
 
 # current user & local hostname & ip
     gargv['hostname'] = socket.gethostname()
-    gargv['curUser'] = pwd.getpwuid(os.getuid()).pw_name
+#    gargv['curUser'] = pwd.getpwuid(os.getuid()).pw_name
+#    gargv['homeDir'] = pwd.getpwuid(os.getuid()).pw_dir #Path.home()
+
     LlocalHosts = []
     LlocalIP = []
     LremoteHosts = []
@@ -172,6 +181,8 @@ def  collectHosts():
             continue
         LremoteHosts.append(host)
     LlocalHosts = list(set(LlocalHosts))
+    if not gargv['exlocal']:
+       LlocalHosts = []
     if len(LlocalHosts) > 0:
        LremoteHosts.append(LlocalHosts[0])
     if len(LremoteHosts) == 0:
@@ -186,11 +197,12 @@ def  transportFiles():
 
     scp = 'scp -o "BatchMode yes" -o "StrictHostKeyChecking no"'
     if gargv['dir']: scp += ' -r'
-
+    rUser = gargv['RUser']
     for Rhost in gargv['allHosts']:
         cmd = scp + ' '
         for f in gargv['filepath']:
-            cmd += f.replace(gargv['char'], f'  {Rhost}') + '  '
+            cmd += f.replace(gargv['char'], f'  {rUser}@{Rhost}') + '  '
+        print('{Rhost}:',cmd)
         rc,rs = runlocalcmd(cmd)
         if rc != 0:
            print(f'[ERROR]: {__run__} to {Rhost} {rs}!')
