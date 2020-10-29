@@ -4,10 +4,10 @@
 import sys
 import os
 if sys.version_info < (3, 6, 0):
-   sys.exit(f'[ERROR]: {__file__} Can\'t Run, Please Upgrade Python Installed On System!')
+    sys.exit('[ERROR]: %s Can\'t Run, Please Upgrade Python Installed On System!' %__file__)
 
 if not ('posix' in sys.builtin_module_names):
-   sys.exit(f'[ERROR]: {__file__} Can\'t Run, Please Run On POSIX OS System!')
+    sys.exit('[ERROR]: %s Can\'t Run, Please Run On POSIX OS System!' %__file__)
 
 import pwd
 import socket
@@ -40,7 +40,7 @@ appDesc = '  -- exchange ssh public keys among friends from greenplum\'s gpssh-e
 
 gargv = {'typ':'rsa', 'fId_key':'id_rsa', 'fId_key_pub':'id_rsa.pub', 'fAuthorized_keys':'authorized_keys',
         'fKnown_hosts':'known_hosts', 'pubKey':'',
-        'allHosts': [], 'remoteHosts':[], 'hostname':None, 'curUser':None, 'homeDir':None}
+        'allHosts': [], 'remoteHosts':[], 'hostname':None, 'curUser':None, 'homeDir':None, 'RUser':None}
 
 ################################################################
 def is_file(path):
@@ -60,6 +60,8 @@ def  parseargs():
              help = 'the new host to connect to(multiple -a is okay)')
     group.add_argument('-f', '--file', dest='allhost', type=is_file,
              help = 'a file listing all new hosts to connect to')
+    parser.add_argument('-u', '--ruser', dest='ruser',
+             help = 'then user logined remote hosts, default is current user')
     cmdarg = parser.parse_args()
 
 parseargs()
@@ -120,7 +122,7 @@ class ssh_connect():
           self.rssh = pxssh.pxssh(echo=False)
           if not passwd:
               passwd = getpass.getpass('password: ')
-          self.rssh.login(hostname, username, passwd, original_prompt='[$#>]')
+          self.rssh.login(hostname, username, passwd, original_prompt='[$#>]', port=22)
           if pw:
               self.__msg__ = passwd
           self.msg = f'{username}@{hostname}'
@@ -167,8 +169,9 @@ if cmdarg.addhost:
 if cmdarg.allhost:
     gargv['allHosts'].extend(readfline(cmdarg.allhost))
 
+gargv['curUser'] = pwd.getpwuid(os.getuid()).pw_name
 gargv['allHosts'] = list(set(gargv['allHosts']))
-
+gargv['RUser'] = (cmdarg.ruser or gargv['curUser'])
 ################################################################
 def  collectHosts():
 
@@ -176,7 +179,7 @@ def  collectHosts():
 
 # current user & local hostname & ip
     gargv['hostname'] = socket.gethostname()
-    gargv['curUser'] = pwd.getpwuid(os.getuid()).pw_name
+#    gargv['curUser'] = pwd.getpwuid(os.getuid()).pw_name
     gargv['homeDir'] = pwd.getpwuid(os.getuid()).pw_dir #Path.home()
     LlocalHosts = []
     LlocalIP = []
@@ -263,10 +266,10 @@ def  genLocalsshfile():
     print (f'\r\n[STEP 2 of 3] create local ID and authorize on local host')
 ## .ssh
     sshDir = Path(gargv['homeDir']) / './.ssh/'
-    authorized_keys_File = Path(sshDir) / gargv['fAuthorized_keys']
-    known_hosts_File = Path(sshDir) / gargv['fKnown_hosts']
-    id_key_File = Path(sshDir) / gargv['fId_key']
-    id_key_pub_File = Path(sshDir) / gargv['fId_key_pub']
+    authorized_keys_File = str(sshDir / gargv['fAuthorized_keys'])
+    known_hosts_File = str(sshDir / gargv['fKnown_hosts'])
+    id_key_File = str(sshDir / gargv['fId_key'])
+    id_key_pub_File = str(sshDir / gargv['fId_key_pub'])
     cmdLOCALfileinit = f'mkdir -p {sshDir}; \
          chmod 0700 {sshDir}; \
          touch {authorized_keys_File}; \
@@ -323,7 +326,7 @@ def  genRemotesshfile():
 
     print (f'\r\n[STEP 3 of 3] create local ID and authorize on each remote host')
     rpasswd = ''
-    Ruser = gargv['curUser']
+    Ruser = gargv['RUser']
     for Rhost in gargv['remoteHosts']:
        Rssh = ssh_connect(Rhost,Ruser,rpasswd,True)
        if not Rssh.rssh:
@@ -349,8 +352,8 @@ def  genRemotesshfile():
 
 ## .ssh init
        sshDir = Path(homeDir) / './.ssh/'
-       authorized_keys_File = Path(sshDir) / gargv['fAuthorized_keys']
-       known_hosts_File = Path(sshDir) / gargv['fKnown_hosts']
+       authorized_keys_File = str(sshDir / gargv['fAuthorized_keys'])
+       known_hosts_File = str(sshDir / gargv['fKnown_hosts'])
        cmdREMOTEfileinit = f'mkdir -p {sshDir} {redirect1}; \
             chmod 0700 {sshDir} {redirect2}; \
             touch {authorized_keys_File} {redirect2}; \
