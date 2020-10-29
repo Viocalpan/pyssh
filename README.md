@@ -8,3 +8,5 @@ rewite greenplum tools (gpssh,gpscp,gpssh-exkeys) with python3 and remove 3th li
 * pyssh  Dependencies pexpect 
 * pyscp  Dependencies no 3th library
 * pysshexK Dependencies pexpect 
+* fix pyssh quit bug,this from greenplum
++ add remotehost user to login
