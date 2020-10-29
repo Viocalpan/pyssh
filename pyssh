@@ -12,10 +12,10 @@ rewite greenplum tools(gpssh,gpscp,gpssh-exkeys) with python3 and remove 3th lib
 import sys
 import os
 if sys.version_info < (3, 6, 0):
-   sys.exit(f'[ERROR]: {__file__} Can\'t Run, Please Upgrade Python Installed On System!')
+    sys.exit('[ERROR]: %s Can\'t Run, Please Upgrade Python Installed On System!' %__file__)
 
 if not ('posix' in sys.builtin_module_names):
-   sys.exit(f'[ERROR]: {__file__} Can\'t Run, Please Run On POSIX OS System!')
+    sys.exit('[ERROR]: %s Can\'t Run, Please Run On POSIX OS System!' %__file__)
 
 import time
 import pwd
@@ -50,7 +50,7 @@ appVer = '0.6.0'
 appPath = __path__
 appDesc = '  -- ssh access to multiple hosts at once from greenplum\'s gpssh'
 
-gargv = {'allHosts':[], 'hostname':None, 'curUser':None, 'homeDir':None, 'echo': False,
+gargv = {'allHosts':[], 'RUser':None, 'echo': False, 'exlocal': False,
 	       'DELAY_BEFORE_SEND':0.05, 'PROMPT_VALIDATION_TIMEOUT':1.0, 'SYNC_RETRIES':3}
 
 ################################################################
@@ -66,6 +66,7 @@ def  parseargs():
     parser = ArgumentParser(prog=appName, description=''.join((appName,appDesc)))
     parser.add_argument('-ver', action='version',
              version = f'{appName}{appDesc} version:[{appVer}]')
+
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('-a', '--add', dest='addhost', nargs='+',
              help = 'the new host to connect to(multiple -a is okay)')
@@ -73,6 +74,10 @@ def  parseargs():
              help = 'a file listing all new hosts to connect to')
     parser.add_argument('-e', dest='echo', action='store_true', default=gargv['echo'],
              help = 'echo commands as they are executed')
+    parser.add_argument('-x', dest='exlocal', action='store_true', default=gargv['exlocal'],
+             help = 'exclude local host')
+    parser.add_argument('-u', '--ruser', dest='ruser',
+             help = 'then user logined remote hosts, default is current user')
     parser.add_argument('cmd', nargs='*',
           help = 'the command to execute. If not present,go into interactive mode')
     cmdarg = parser.parse_args()
@@ -150,16 +155,21 @@ if cmdarg.allhost:
 
 gargv['allHosts'] = list(set(gargv['allHosts']))
 gargv['echo'] = cmdarg.echo
+gargv['exlocal'] = cmdarg.exlocal
 gargv['cmd'] = ' '.join(cmdarg.cmd)
 gargv['cmd']  = gargv['cmd'] .strip()
+
+CUser = pwd.getpwuid(os.getuid()).pw_name
+gargv['RUser'] = (cmdarg.ruser or CUser)
 
 ################################################################
 def  collectHosts():
 
 # current user & local hostname & ip
-    gargv['hostname'] = socket.gethostname()
-    gargv['curUser'] = pwd.getpwuid(os.getuid()).pw_name
-    gargv['homeDir'] = pwd.getpwuid(os.getuid()).pw_dir #Path.home()
+    CHostname = socket.gethostname()
+#    gargv['hostname'] = socket.gethostname()
+#    gargv['curUser'] = pwd.getpwuid(os.getuid()).pw_name
+#    gargv['homeDir'] = pwd.getpwuid(os.getuid()).pw_dir #Path.home()
     LlocalHosts = []
     LlocalIP = []
     LremoteHosts = []
@@ -178,7 +188,7 @@ def  collectHosts():
     if len(LlocalIP) == 0:
         exit(f'[ERROR]: {__run__}  can\'t get local ip!')
 
-    LlocalHosts.append(gargv['hostname'])
+    LlocalHosts.append(CHostname)
     for host in gargv['allHosts']:
         try:
             ip = socket.gethostbyname(host)
@@ -188,7 +198,10 @@ def  collectHosts():
         except Exception as Err:
             continue
         LremoteHosts.append(host)
+
     LlocalHosts = list(set(LlocalHosts))
+    if not gargv['exlocal']:
+       LlocalHosts = []
     if len(LlocalHosts) > 0:
        LremoteHosts.append(LlocalHosts[0])
     if len(LremoteHosts) == 0:
@@ -298,7 +311,7 @@ class PxsshWrapper(pxssh.pxssh):
 # Session is a command session, derived from a base class cmd.Cmd
 class Session(cmd.Cmd):
     '''Implements a list of open ssh sessions ready to execute commands'''
-    verbose = False
+#    verbose = False
     hostList = []
     userName = None
     echoCommand = False
@@ -329,7 +342,7 @@ class Session(cmd.Cmd):
 
     def login(self, hostList=None, userName=None, delaybeforesend=0.05, sync_multiplier=1.0, sync_retries=3):
         """This is the normal entry point used to add host names to the object and log in to each of them"""
-        if self.verbose: print('\n[Reset ...]')
+ #      if self.verbose: print('\n[Reset ...]')
         if not (self.hostList or hostList):
             raise self.SessionError('No host list available to Login method')
         if not (self.userName or userName):
@@ -361,9 +374,9 @@ class Session(cmd.Cmd):
                 p.x_peer = hostname
                 p.x_pid = p.pid
                 good_list.append(p)
-                if self.verbose:
-                    with print_lock:
-                        print(f'[INFO] login {hostname}')
+#                if self.verbose:
+#                    with print_lock:
+#                        print(f'[INFO] login {hostname}')
             except Exception as Err:
                 with print_lock:
                     print(f'[ERROR] unable to login to {hostname}')
@@ -413,6 +426,7 @@ class Session(cmd.Cmd):
         '''Escape occurrences of \ and $ as needed and package the line as an "eval" shell command'''
         line = line.strip()
         if line == 'EOF' or line == 'exit' or line == 'quit':
+            self.close()
             raise self.SessionCmdExit()
         line = line.split('\\')
         line = '\\\\'.join(line)
@@ -459,9 +473,7 @@ class Session(cmd.Cmd):
     def default(self, command):
 
         line = self.escapeLine(command)
-
-        if self.verbose: print(command)
-
+ #       if self.verbose: print(command)
         # Execute the command on our ssh sessions
         commandoutput = self.executeCommand(command)
         self.writeCommandOutput(commandoutput)
@@ -483,6 +495,7 @@ class Session(cmd.Cmd):
         return_codes = [0]
 
         def closePxsshOne(p, return_codes):
+            p.sendline('history -c')
             p.logout()
             with lock:
                 return_codes.append(p.exitstatus)
@@ -504,7 +517,7 @@ def  sessionCleanup(sshsession):
         try:
             return_code = 0
             if sshsession:
-                if sshsession.verbose: print('\n[Cleanup...]');
+ #               if sshsession.verbose: print('\n[Cleanup...]');
                 return_code = sshsession.close()
             sshsession = None
             return return_code
@@ -531,7 +544,7 @@ def  interactive(sshsession):
     try:
         import readline
         # Read in the saved command history, if any
-        histfile = Path(gargv['homeDir'])/ '.pyssh_his'
+        histfile = str(Path(sys.argv[0]).resolve().parent / '.pyssh_his')
         readline.set_history_length(500)
         try:
             readline.read_history_file(histfile)
@@ -555,8 +568,7 @@ def  interactive(sshsession):
         try:
             if not sshsession:
                 sshsession = Session()
-                sshsession.verbose = False
-                sshsession.login(gargv['allHosts'], gargv['curUser'], gargv['DELAY_BEFORE_SEND'], gargv['PROMPT_VALIDATION_TIMEOUT'], gargv['SYNC_RETRIES'])
+                sshsession.login(gargv['allHosts'], gargv['RUser'], gargv['DELAY_BEFORE_SEND'], gargv['PROMPT_VALIDATION_TIMEOUT'], gargv['SYNC_RETRIES'])
                 sshsession.echoCommand = gargv['echo']
             sshsession.cmdloop()
         except EOF:
@@ -580,12 +592,11 @@ try:
     if gargv['cmd']:
         try:
             sshsession = Session()
-            sshsession.verbose = False
-            sshsession.login(gargv['allHosts'], gargv['curUser'], gargv['DELAY_BEFORE_SEND'], gargv['PROMPT_VALIDATION_TIMEOUT'], gargv['SYNC_RETRIES'])
+            sshsession.login(gargv['allHosts'], gargv['RUser'], gargv['DELAY_BEFORE_SEND'], gargv['PROMPT_VALIDATION_TIMEOUT'], gargv['SYNC_RETRIES'])
             sshsession.echoCommand = gargv['echo']
             output = sshsession.executeCommand(gargv['cmd'])
             sshsession.writeCommandOutput(output)
-            if sshsession.verbose: print('[INFO] completed successfully')
+#            if sshsession.verbose: print('[INFO] completed successfully')
             sys.stdout.flush()
         except Session.SessionError as Err:
             print(f'Error: {Err}')
